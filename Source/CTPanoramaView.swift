@@ -11,6 +11,12 @@ import SceneKit
 import CoreMotion
 import ImageIO
 
+@objc public protocol PanoramicViewDisplayDelegate {
+    func rotationDidPause()
+    func rotationDidBegin()
+    func panoramicViewDidPan()
+}
+
 @objc public protocol CTPanoramaCompass {
     func updateUI(rotationAngle: CGFloat, fieldOfViewAngle: CGFloat)
 }
@@ -25,11 +31,13 @@ import ImageIO
     case spherical
 }
 
-@objc public class CTPanoramaView: UIView {
+@objc public class CTPanoramaViewer: UIView {
     
-    // MARK: Public properties
+    // MARK: - Public properties
     
     public var panSpeed = CGPoint(x: 0.005, y: 0.005)
+    
+    public var displayDelegate: PanoramicViewDisplayDelegate?
     
     public var image: UIImage? {
         didSet {
@@ -46,21 +54,19 @@ import ImageIO
     public var panoramaType: CTPanoramaType = .cylindrical {
         didSet {
             createGeometryNode()
-            resetCameraAngles()
         }
     }
     
     public var controlMethod: CTPanoramaControlMethod! {
         didSet {
             switchControlMethod(to: controlMethod!)
-            resetCameraAngles()
         }
     }
     
     public var compass: CTPanoramaCompass?
     public var movementHandler: ((_ rotationAngle: CGFloat, _ fieldOfViewAngle: CGFloat) -> ())?
     
-    // MARK: Private properties
+    //MARK: - Private properties
     
     private let radius: CGFloat = 10
     private let sceneView = SCNView()
@@ -69,6 +75,8 @@ import ImageIO
     private var geometryNode: SCNNode?
     private var prevLocation = CGPoint.zero
     private var prevBounds = CGRect.zero
+    
+    private var rotationTimer = Timer()
     
     private lazy var cameraNode: SCNNode = {
         let node = SCNNode()
@@ -95,7 +103,7 @@ import ImageIO
         return .cylindrical
     }
     
-    // MARK: Class lifecycle methods
+    // MARK: - Class lifecycle methods
     
     public required init?(coder aDecoder: NSCoder) {
         super.init(coder: aDecoder)
@@ -120,7 +128,7 @@ import ImageIO
     
     private func commonInit() {
         add(view: sceneView)
-    
+        
         scene.rootNode.addChildNode(cameraNode)
         
         sceneView.scene = scene
@@ -129,10 +137,9 @@ import ImageIO
         if controlMethod == nil {
             controlMethod = .touch
         }
-     }
+    }
     
-    // MARK: Configuration helper methods
-
+    //MARK: - Configuration helper methods
     private func createGeometryNode() {
         guard let image = image else {return}
         
@@ -176,11 +183,11 @@ import ImageIO
     
     private func switchControlMethod(to method: CTPanoramaControlMethod) {
         sceneView.gestureRecognizers?.removeAll()
-
+        
         if method == .touch {
-                let panGestureRec = UIPanGestureRecognizer(target: self, action: #selector(handlePan(panRec:)))
-                sceneView.addGestureRecognizer(panGestureRec)
- 
+            let panGestureRec = UIPanGestureRecognizer(target: self, action: #selector(handlePan(panRec:)))
+            sceneView.addGestureRecognizer(panGestureRec)
+            
             if motionManager.isDeviceMotionActive {
                 motionManager.stopDeviceMotionUpdates()
             }
@@ -193,7 +200,7 @@ import ImageIO
                 guard panoramaView.controlMethod == .motion else {return}
                 
                 guard let motionData = motionData else {
-                    print("\(error?.localizedDescription)")
+                    print("\(String(describing: error?.localizedDescription))")
                     panoramaView.motionManager.stopDeviceMotionUpdates()
                     return
                 }
@@ -214,7 +221,7 @@ import ImageIO
         }
     }
     
-    private func resetCameraAngles() {
+    public func resetCameraAngles() {
         cameraNode.eulerAngles = SCNVector3Make(0, 0, 0)
         self.reportMovement(0, xFov.toRadians(), callHandler: false)
     }
@@ -226,12 +233,35 @@ import ImageIO
         }
     }
     
-    // MARK: Gesture handling
+    
+    //MARK: - Rotation methods
+    
+    public func startRotation(withSpeed speed: Double) {
+        rotationTimer = Timer.scheduledTimer(timeInterval: speed, target: self, selector: #selector(rotatePanorama), userInfo: nil, repeats: true)
+        displayDelegate?.rotationDidBegin()
+    }
+    
+    public func pauseRotation() {
+        rotationTimer.invalidate()
+        displayDelegate?.rotationDidPause()
+    }
+    
+    @objc private func rotatePanorama() {
+        DispatchQueue.main.async {
+            self.cameraNode.eulerAngles.y += 0.05
+        }
+    }
+    
+    // MARK: - Gesture handling
     
     @objc private func handlePan(panRec: UIPanGestureRecognizer) {
+        
+        self.displayDelegate?.panoramicViewDidPan()
+        
         if panRec.state == .began {
             prevLocation = CGPoint.zero
         }
+            
         else if panRec.state == .changed {
             var modifiedPanSpeed = panSpeed
             
@@ -240,16 +270,19 @@ import ImageIO
             }
             
             let location = panRec.translation(in: sceneView)
-            let orientation = cameraNode.eulerAngles
-            var newOrientation = SCNVector3Make(orientation.x + Float(location.y - prevLocation.y) * Float(modifiedPanSpeed.y),
-                                                orientation.y + Float(location.x - prevLocation.x) * Float(modifiedPanSpeed.x),
-                                                orientation.z)
+            
+            let currentOrienation = cameraNode.eulerAngles
+            
+            var newOrientation = SCNVector3Make(currentOrienation.x + Float(location.y - prevLocation.y) * Float(modifiedPanSpeed.y),
+                                                currentOrienation.y + Float(location.x - prevLocation.x) * Float(modifiedPanSpeed.x),
+                                                currentOrienation.z)
             
             if controlMethod == .touch {
                 newOrientation.x = max(min(newOrientation.x, 1.1),-1.1)
             }
-
+            
             cameraNode.eulerAngles = newOrientation
+            
             prevLocation = location
             
             reportMovement(CGFloat(-cameraNode.eulerAngles.y), xFov.toRadians())
@@ -267,7 +300,7 @@ import ImageIO
 
 fileprivate extension CMDeviceMotion {
     
-        func orientation() -> SCNVector4 {
+    func orientation() -> SCNVector4 {
         
         let attitude = self.attitude.quaternion
         let aq = GLKQuaternionMake(Float(attitude.x), Float(attitude.y), Float(attitude.z), Float(attitude.w))
